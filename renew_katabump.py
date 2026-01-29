@@ -101,10 +101,15 @@ class KatabumpAutoRenew:
         if PROXY_SERVER:
             chrome_options.add_argument(f'--proxy-server={PROXY_SERVER}')
         v_env = os.getenv('CHROME_VERSION')
-        v_main = int(v_env) if v_env and v_env.isdigit() else None
         try:
-            self.driver = uc.Chrome(options=chrome_options, headless=HEADLESS, version_main=v_main)
+            v_main = int(v_env) if v_env and v_env.isdigit() else None
+        except:
+            v_main = None
+        logger.info(f"🛠️ 驱动初始化 - 目标大版本: {v_main or '自动探测'}")
+        try:
+            self.driver = uc.Chrome(options=chrome_options, headless=HEADLESS, version_main=v_main, use_subprocess=True)
         except Exception as e:
+            logger.warning(f"⚠️ 强制版本启动失败，尝试降级启动: {e}")
             self.driver = uc.Chrome(options=chrome_options, headless=HEADLESS)
         self.driver.set_window_size(1280, 720)
 

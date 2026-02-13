@@ -110,6 +110,45 @@ class KatabumpAutoRenew:
             self.driver = uc.Chrome(options=chrome_options, headless=HEADLESS)
         self.driver.set_window_size(1280, 720)
 
+    def _handle_turnstile(self, context=""):
+        """优化后的 Cloudflare 验证逻辑"""
+        try:
+            container = WebDriverWait(self.driver, 15).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "cf-turnstile"))
+            )
+            size = container.size
+            base_offset_x = -(size['width'] / 2) + (size['width'] * 0.12)
+            rand_x = base_offset_x + random.uniform(-5, 5)
+            rand_y = random.uniform(-5, 5)
+
+            actions = ActionChains(self.driver)
+            actions.move_to_element(container)
+            actions.pause(random.uniform(0.5, 0.8))
+            actions.move_to_element_with_offset(container, rand_x, rand_y)
+            actions.click_and_hold()
+            actions.pause(random.uniform(0.1, 0.25))
+            actions.release()
+            actions.perform()
+            
+            logger.info(f"🖱️ {self.masked_user} - [{context}] 执行偏移点击...")
+            
+            # 轮询检查 Token
+            validated = False
+            for _ in range(15):
+                token = self.driver.execute_script(
+                    'return document.querySelector("input[name=\'cf-turnstile-response\']").value;'
+                )
+                if token and len(token) > 20:
+                    logger.info(f"✅ {self.masked_user} - [{context}] 验证已通过 (Token Ready)")
+                    sleep(1500 + random.random() * 1000)
+                    validated = True
+                    break
+                sleep(1000)
+            return validated
+        except Exception as e:
+            logger.error(f"❌ {self.masked_user} - [{context}] 验证交互失败: {e}")
+            return False
+
     def process(self):
         logger.info(f"🚀 开始登录账号: {self.masked_user}")
         self.driver.get("https://dashboard.katabump.com/auth/login")
@@ -127,6 +166,9 @@ class KatabumpAutoRenew:
             raise Exception("未找到密码输入框")
         sleep(2000 + random.random() * 1000)
 
+        # --- 登录页 CF 验证 ---
+        self._handle_turnstile("Login Auth")
+
         logger.info(f"📤 {self.masked_user} - 点击“Login”提交登录...")
         self.driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
         human_delay()
@@ -136,7 +178,6 @@ class KatabumpAutoRenew:
         manage_btn = WebDriverWait(self.driver, 30).until(
             EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'See')]"))
         )
-        logger.info(f"⚙️ {self.masked_user} - 点击 See ...")
         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", manage_btn)
         sleep(1000 + random.random() * 1000)
         self.driver.execute_script("arguments[0].click();", manage_btn)
@@ -165,34 +206,10 @@ class KatabumpAutoRenew:
             raise Exception(f"无法打开弹窗: {e}")
         sleep(2000 + random.random() * 1000)
 
-        # 3. Cloudflare 验证
-        try:
-            container = self.driver.find_element(By.CLASS_NAME, "cf-turnstile")
-            actions = ActionChains(self.driver)
-            actions.move_to_element_with_offset(container, -120, 0).click().perform()
-            logger.info(f"🖱️ {self.masked_user} - 执行偏移点击...")
-            # ---轮询检查 Token ---
-            validated = False
-            logger.info(f"⏳ {self.masked_user} - 等待验证通过...")
-            for _ in range(10):
-                # 检查隐藏的 response 输入框是否有值
-                token = self.driver.execute_script(
-                    'return document.querySelector("input[name=\'cf-turnstile-response\']").value;'
-                )
-                if token and len(token) > 20:
-                    logger.info(f"✅ {self.masked_user} - 验证已通过 (Token Ready)")
-                    sleep(1000 + random.random() * 1000)                  
-                    validated = True
-                    break
-                sleep(1000)
-            
-            if not validated:
-                logger.warning(f"⚠️ {self.masked_user} - 验证未能在 10s 内完成，尝试继续...")
+        # --- 续期弹窗 CF 验证 ---
+        self._handle_turnstile("Renew Modal")
 
-        except Exception as e:
-            logger.error(f"❌ 验证框交互失败: {e}")
-
-        # 4. 最终 Renew 按钮
+        # --- 最终 Renew 按钮 ---
         try:
             confirm_btn_xpath = "//div[@id='renew-modal']//button[@type='submit' and contains(text(), 'Renew')]"
             confirm_btn = WebDriverWait(self.driver, 10).until(
@@ -208,31 +225,59 @@ class KatabumpAutoRenew:
 
         # 结果核验
         try:
+            alerts = self.driver.find_elements(By.CSS_SELECTOR, ".alert-danger")
+            if alerts and alerts[0].is_displayed():
+                alertmsg = alerts[0].text.strip().replace('×', '')
+                logger.warning(f"⚠️ {self.masked_user} - 续期失败: {alertmsg}")
+                return False, f"⏳ {self.masked_user}\n⚠️ 续期失败: {alertmsg}"
+            
             final_expiry_element = self.driver.find_element(By.XPATH, "//div[contains(text(), 'Expiry')]/following-sibling::div")
             final_expiry = final_expiry_element.text.strip()
             logger.info(f"✅ {self.masked_user} - 续期后到期时间: {final_expiry}")
 
             if final_expiry != initial_expiry and len(final_expiry) > 0:
-                return True, f"✅ {self.masked_user}\n🎉 续期成功： {final_expiry}"
+                return True, f"✅ {self.masked_user}\n🎉 续期成功: {final_expiry}"
             else:
-                return False, f"❌ {self.masked_user}\n⚠️ 时间未更新 ({initial_expiry})"
+                return False, f"⚠️ {self.masked_user}\n⚠️ 时间未更新 ({initial_expiry})"
         except Exception as e:
             return False, f"❌ {self.masked_user}\n⚠️ 验证结果出错: {e}"
 
     def run(self):
-        try:
-            self.setup_driver()
-            success, message = self.process()
-            return success, message
-        except Exception as e:
-            logger.error(f"❌ {self.masked_user} - 操作失败: {e}")
-            self.screenshot_path = f"error-{self.user.split('@')[0]}.png"
-            if self.driver:
-                self.driver.save_screenshot(self.screenshot_path)
-            return False, f"❌ {self.masked_user} 操作失败：{str(e)[:50]}"
-        finally:
-            if self.driver:
-                self.driver.quit()
+        """引入重试机制的核心运行逻辑"""
+        max_retries = 3
+        last_error = ""
+        
+        for attempt in range(max_retries):
+            try:
+                if not self.driver:
+                    self.setup_driver()
+                
+                if attempt > 0:
+                    logger.info(f"🔄 {self.masked_user} - 正在进行第 {attempt + 1} 次尝试...")
+                    self.driver.refresh()
+                    sleep(5000 + random.random() * 3000)
+
+                success, message = self.process()
+                
+                if success:
+                    return True, message
+                else:
+                    last_error = message
+                    if "时间未更新" in message or "续期失败" in message:
+                        break
+                    
+            except Exception as e:
+                last_error = f"异常：{str(e)[:50]}"
+                logger.error(f"❌ {self.masked_user} 第 {attempt + 1} 次执行出错: {e}")
+                
+            if attempt < max_retries - 1:
+                sleep(5000 + random.random() * 5000)
+        
+        # 最终失败处理
+        self.screenshot_path = f"error-{self.user.split('@')[0]}.png"
+        if self.driver:
+            self.driver.save_screenshot(self.screenshot_path)
+        return False, f"❌ {self.masked_user} 历经 {max_retries} 次尝试仍失败: {last_error}"
 
 # ===================== 主逻辑管理 =====================
 class MultiManager:
